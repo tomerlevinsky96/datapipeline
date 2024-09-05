@@ -12,7 +12,7 @@ def connect_to_db():
             password="t1",
             host="localhost",
             port="5433",  # Assuming default PostgreSQL port
-            database="appdb1"
+            database="postgres5"
         )
         connection.autocommit = True
         return connection
@@ -141,11 +141,13 @@ def INSERT_INTO_ANSWERS_TABLE(Answers):
                     select_query = f"SELECT QuestionaireID FROM questionaire WHERE dateTime='{row['time.stamp']}'"
                     cursor.execute(select_query)
                     QuestionaireID = cursor.fetchone()[0]
-
-                    # Insert the answer data into the answers table
-                    insert_query = f"INSERT INTO answers (SubjectID, QuestioneId, QuestionaireID, Answer) VALUES ('{row['subject.code']}', {QuestioneId}, {QuestionaireID}, N'{Answer}');"
-                    cursor.execute(insert_query)
-                    connection.commit()
+                    select_query=F"SELECT GuId FROM SUBJECTS WHERE QuestionaireCode='{row['subject.code']}'"
+                    cursor.execute(select_query)
+                    GuId = cursor.fetchone()
+                    if GuId:
+                      insert_query = f"INSERT INTO answers (GuId,QuestionaireCode, QuestioneId, QuestionaireID, Answer) VALUES ('{GuId[0]}','{row['subject.code']}', {QuestioneId}, {QuestionaireID}, N'{Answer}');"
+                      cursor.execute(insert_query)
+                      connection.commit()
                 except Error as e:
                     if "syntax error" in str(e).lower():
                         print(f"Failed query: {insert_query}")
@@ -162,7 +164,7 @@ def read_excel_and_insert_data(file_path):
         excel_data[column] = [str(item).strip() for item in excel_data[column]]
 
     excluded_columns = [excel_data.columns[0]]
-    Answers = excel_data.drop(columns=excluded_columns)
+    Answers = excel_data
 
     # Insert data into the corresponding tables
     INSERT_INTO_QUESTIONAIRE_TABLE(excel_data)

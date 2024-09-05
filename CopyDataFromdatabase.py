@@ -10,7 +10,7 @@ source_db_config = {
     'password': 't1',
     'host': 'localhost',
     'port': '5433',
-    'database': 'appdb1'
+    'database': 'postgres5'
 }
 
 # Connection parameters for destination database
@@ -19,7 +19,7 @@ destination_db_config = {
     'password': 't1',
     'host': 'localhost',
     'port': '5433',
-    'database': 'appData'
+    'database': 'appdb'
 }
 
 def get_columns(table_name, cursor):
@@ -97,13 +97,38 @@ def build_query_with_values(tablename, colnames, row):
     query = f"INSERT INTO {tablename} ({colnames_str}) VALUES ({values_str})"
     return query
 
-def calculate_age(birthdate, reference_date):
-    age = reference_date.year - birthdate.year
-    return age
+
+
+def process_data_table(tablename,excluded_columns):
+
+    try:
+        # Connect to the source database
+        source_conn = psycopg2.connect(**source_db_config)
+        source_cursor = source_conn.cursor()
+        dest_conn = psycopg2.connect(**destination_db_config)
+        dest_cursor = dest_conn.cursor()
+        # Get all column names
+        all_columns = get_columns(tablename, source_cursor)
+
+        # Exclude specified columns
+        colnames = [col for col in all_columns if col not in excluded_columns]
+
+
+        # Fetch data from source database
+        source_cursor.execute(sql.SQL("SELECT {} FROM {}").format(
+            sql.SQL(', ').join(map(sql.Identifier, [col for col in all_columns if col not in excluded_columns])),
+            sql.Identifier(tablename)
+        ))
+        data = source_cursor.fetchall()
+    except Exception as e:
+        print(f"Error processing CRF table: {e}")
+    insert_data_into_destination(tablename, data, colnames)
+
+
 
 def process_crf_table():
         tablename = 'crf'
-        exclude_columns = ['id', 'phonenumber', 'email', 'firstname', 'lastname']
+        exclude_columns = ['dob','id', 'cellularno', 'email', 'firstname', 'lastname']
 
         try:
             # Connect to the source database
@@ -116,7 +141,6 @@ def process_crf_table():
 
             # Exclude specified columns
             colnames = [col for col in all_columns if col not in exclude_columns]
-            colnames = ['age' if col == 'dob' else col for col in colnames]
 
             # Fetch data from source database
             source_cursor.execute(sql.SQL("SELECT {} FROM {}").format(
@@ -124,36 +148,18 @@ def process_crf_table():
                 sql.Identifier(tablename)
             ))
             data = source_cursor.fetchall()
-            for row_index, row in enumerate(data):
-                # Convert string to timestamp
-                birthdate_str = row[3].split('.')[0] if '.' in row[3] else row[3]
-                if birthdate_str!='NaT':
-                   if re.match(r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$', birthdate_str):
-                      birthdate = datetime.strptime(birthdate_str, '%Y-%m-%d %H:%M:%S')  # Adjust format if necessary
-                      reference_date = row[0]
-                      age = reference_date.year - birthdate.year
-                   elif  re.match(r'^\d{2}/\d{2}/\d{4}$', birthdate_str):
-                       birthdate = datetime.strptime(birthdate_str, '%d/%m/%Y')                         # Adjust format if necessary
-                       reference_date = row[0]
-                       age = reference_date.year - birthdate.year
-                else:
-                   age='NaT'
-
-                row = list(row)
-                row[3] = age
-                data[row_index] = tuple(row)
-            # Calculate age and prepare data for insertion
         except Exception as e:
             print(f"Error processing CRF table: {e}")
-        insert_data_into_destination(tablename, data, colnames)
+        insert_data_into_destination(tablename,data,colnames)
 
 def main():
-        tablenames = ['subjects', 'questionaire', 'questiones', 'crf', 'sharedscans', 'answers']
+        tablenames = ['subjects', 'questionaire', 'questiones', 'crf', 'scans', 'answers']
         exclude_columns = ['id', 'phonenumber', 'email', 'firstname', 'lastname']
-
         for tablename in tablenames:
-            if tablename == 'crf':
-                process_crf_table()
+            if tablename=='subjects':
+                process_data_table(tablename,['id','email'])
+            elif tablename=='crf':
+                process_data_table(tablename, ['dob','id', 'cellularno', 'email', 'firstname', 'lastname'])
             else:
                 # Fetch data from source database
                 data, colnames = fetch_data_from_source(tablename, exclude_columns)

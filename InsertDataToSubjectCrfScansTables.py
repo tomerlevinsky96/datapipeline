@@ -1,4 +1,6 @@
 import numpy as np
+import gspread
+from google.oauth2.service_account import Credentials
 import pandas as pd
 import psycopg2
 from openpyxl.workbook import Workbook
@@ -43,14 +45,29 @@ def findGuid(ID_or_phone,cursor,connection):
     return guid
 
 
+def reorder_rows_by_ID(Crf_Data):
+    Crf_Data['ID'] = pd.to_numeric(Crf_Data['ID'], errors='coerce')
+
+    # Sort the DataFrame, placing NaN values at the end
+    Crf_Data = Crf_Data.sort_values(by='ID', na_position='last')
+
+    # Convert 'ID' to string, handling NaN values explicitly
+    Crf_Data['ID'] = Crf_Data['ID'].apply(lambda x: str(int(x)) if pd.notna(x) else '')
+
+    # Reset index if needed
+    Crf_Data.reset_index(drop=True, inplace=True)
+    return Crf_Data
+
+
+
 # Function to process and insert data from CrfYaData DataFrame into the Patients table
 def Crf_to_subjet_table(Crf_Data,cursor, connection):
-    Crf_Data = Crf_Data.sort_values(by='ID', na_position='last')
+    Crf_Data=reorder_rows_by_ID(Crf_Data)
     for index, row in Crf_Data.iterrows():
         try:
             questionaire_code = row['Qcode']
             if str(questionaire_code) != 'nan':
-              if row['ID']!='nan':
+              if row['ID']!='' :
                   select_query = f"""select guid from subjects where id='{row['ID']}'"""
                   cursor.execute(select_query)
                   guid = cursor.fetchone()
@@ -70,7 +87,7 @@ def Crf_to_subjet_table(Crf_Data,cursor, connection):
                       insert_query = f"INSERT INTO subjects(GuId,QuestionaireCode,id,email) VALUES ('{guid[0]}','{questionaire_code}','{row['ID']}','{row['Email']}');"
                       cursor.execute(insert_query)
                       connection.commit()
-              elif row['Email']!='nan':
+              elif row['Email']!='' :
                   select_query = f"""select guid from subjects where email='{row['Email']}'"""
                   cursor.execute(select_query)
                   guid = cursor.fetchone()
@@ -85,8 +102,7 @@ def Crf_to_subjet_table(Crf_Data,cursor, connection):
 
 # Function to transform and insert data from CrfYaData DataFrame into the CRF table
 def Crf_Data_crf_table(Crf_Data, cursor, connection):
-    Crf_Data = Crf_Data.sort_values(by='ID', na_position='last')
-    columns_to_exclude = ['Unnamed: 16', 'Unnamed: 19']
+    Crf_Data = reorder_rows_by_ID(Crf_Data)
     # Find the index of the 'Name' column
     name_index = Crf_Data.columns.get_loc('Name')
     # Split the 'Name' column into 'FirstName' and 'LastName'
@@ -96,10 +112,9 @@ def Crf_Data_crf_table(Crf_Data, cursor, connection):
     # Insert 'FirstName' and 'LastName' columns at the same location as the original 'Name' column
     Crf_Data.insert(name_index, 'FirstName', Crf_Data.pop('FirstName'))
     Crf_Data.insert(name_index + 1, 'LastName', Crf_Data.pop('LastName'))
-    Crf_Data=Crf_Data.drop(columns=columns_to_exclude, errors='ignore')
     for index, row in Crf_Data.iterrows():
-        if str(row['ScanID']) != 'NaT' and str(row['ScanID']) != 'nan':
-            if row['ID']!='nan':
+        if str(row['ScanID']) != 'NaT' and str(row['ScanID']) !='':
+            if row['ID']!='':
                   select_query = f"""select guid from subjects where ID='{row['ID']}'"""
                   cursor.execute(select_query)
                   guid = cursor.fetchone()
@@ -116,7 +131,7 @@ def Crf_Data_crf_table(Crf_Data, cursor, connection):
                         connection.commit()
                      except psycopg2.Error as e:
                         print(e)
-            elif row['Email']:
+            elif row['Email']!='':
               try:
                   select_query = f"""select guid from subjects where email='{row['Email']}'"""
                   cursor.execute(select_query)
@@ -186,15 +201,26 @@ def process_and_insert_YaSharedScansData(YaSharedScansData, cursor, connection):
 
 
 # Function to read the Excel and CSV files and insert data into the PostgreSQL database
-def read_excel_and_insert_data(Crf_Path,Ya_Shared_Scans_path,Questionaire_path,SNBB_path):
+def open_and_read_google(sheet_id):
+    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
+    client = gspread.authorize(creds)
+    workbook = client.open_by_key(sheet_id)
+    # Get all values from the worksheet
+    worksheet = workbook.get_worksheet(0)
+    data=worksheet.get_all_values()
+    data=pd.DataFrame(data[1:], columns=data[0])
+    return data
+
+
+
+
+def read_excel_and_insert_data(Crf_Path,Ya_Shared_Scans_path,SNBB_path):
     try:
         # Connect to the PostgreSQL database
         connection = connect_to_db()
         cursor = connection.cursor()
-
-        # Read data from the Excel and CSV files
-        Crf_Data = pd.read_excel(Crf_Path)
-        Questionaire_Data = pd.read_excel(Questionaire_path)
+        Crf_Data = open_and_read_google(Crf_Path)
         SnBB_Scans_Data=pd.read_excel(SNBB_path)
         YaShared_Scans_Data=pd.read_excel(Ya_Shared_Scans_path)
 
@@ -207,11 +233,10 @@ def read_excel_and_insert_data(Crf_Path,Ya_Shared_Scans_path,Questionaire_path,S
         # YaSharedScansData.to_excel(ya_shared_scans_excel_file_path, sheet_name='YaSharedScansData', index=False)
         # print(f'Data successfully written to {snbb_excel_file_path} and {ya_shared_scans_excel_file_path}')
         # Strip whitespace from all columns in the dataframes
+        columns_to_exclude = ['']
+        Crf_Data = Crf_Data.drop(columns=columns_to_exclude, errors='ignore')
         for column in Crf_Data.columns:
             Crf_Data[column] = Crf_Data[column].apply(lambda x: str(x).strip())
-        for column in Questionaire_Data.columns:
-            Questionaire_Data[column] = Questionaire_Data[column].apply(lambda x: str(x).strip())
-
         for column in SnBB_Scans_Data.columns:
             SnBB_Scans_Data[column] = SnBB_Scans_Data[column].apply(lambda x: str(x).strip())
         for column in YaShared_Scans_Data.columns:
@@ -286,13 +311,13 @@ def check_for_subject_with_missing_details(Questionaire_path):
 
 
 # Paths to the files
-CrfPath='AllSubjectData.xlsx'
+CrfPath='1ZawIJ14Qep7r2Cs6PKI9lUVl5B2P3OKwdeTUARFQkag'
 #Ya_Shared_Scans_path = '//132.66.46.62/Raw_Data'
-Questionaire_path = '2024 full data and coded categories.xlsx'
+#Questionaire_path = '1wyOBqgKe6mrSBQV32OAICFJIuWPqER_49cGaTvw41QM'
 #SNBB_path = '//132.66.46.165/snbb'
 Ya_Shared_Scans_path ='YaSharedScansData.xlsx'
 SNBB_path = 'SnBBData.xlsx'
 
 # Run the data pipeline
-read_excel_and_insert_data(CrfPath,Ya_Shared_Scans_path,Questionaire_path,SNBB_path)
+read_excel_and_insert_data(CrfPath,Ya_Shared_Scans_path,SNBB_path)
 ###check_for_subject_with_missing_details(Questionaire_path)

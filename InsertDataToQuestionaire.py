@@ -2,7 +2,8 @@ import pandas as pd
 import psycopg2
 from psycopg2 import Error
 from datetime import datetime, timedelta
-
+import gspread
+from google.oauth2.service_account import Credentials
 
 # Function to connect to PostgreSQL database
 def connect_to_db():
@@ -22,6 +23,21 @@ def connect_to_db():
 
 
 # Function to retrieve column names from a specified table
+
+def open_and_read_google(sheet_id):
+    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
+    client = gspread.authorize(creds)
+    workbook = client.open_by_key(sheet_id)
+    # Get all values from the worksheet
+    worksheet = workbook.get_worksheet(0)
+    data=worksheet.get_all_values()
+    data=pd.DataFrame(data[1:], columns=data[0])
+    return data
+
+
+
+
 def get_columns(table_name, cursor):
     query_command = f"""SELECT column_name FROM information_schema.columns WHERE table_name = '{table_name}'"""
     cursor.execute(query_command)
@@ -155,9 +171,12 @@ def INSERT_INTO_ANSWERS_TABLE(Answers):
                         continue
 
 
+
+
+
 # Function to read the Excel file and insert data into the PostgreSQL database
 def read_excel_and_insert_data(file_path):
-    excel_data = pd.read_excel(file_path)
+    excel_data = open_and_read_google(file_path)
 
     # Strip whitespace from all columns
     for column in excel_data.columns:
@@ -175,4 +194,4 @@ def read_excel_and_insert_data(file_path):
 
 
 # Example usage
-read_excel_and_insert_data('2024 full data and coded categories.xlsx')
+read_excel_and_insert_data('1wyOBqgKe6mrSBQV32OAICFJIuWPqER_49cGaTvw41QM')

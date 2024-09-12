@@ -1,6 +1,7 @@
 import numpy as np
 import gspread
 from google.oauth2.service_account import Credentials
+from psycopg2 import sql
 import pandas as pd
 import psycopg2
 from openpyxl.workbook import Workbook
@@ -27,6 +28,56 @@ def connect_to_db():
     except Error as e:
         print("Error while connecting to PostgreSQL:", e)
 
+source_db_config = {
+    'user': 'tomer',
+    'password': 't1',
+    'host': 'localhost',
+    'port': '5433',
+    'database': 'postgres5'
+}
+
+# Connection parameters for destination database
+destination_db_config = {
+    'user': 'tomer',
+    'password': 't1',
+    'host': 'localhost',
+    'port': '5433',
+    'database': 'appdb'
+}
+
+def truncate_all_tables(DB_CONFIG):
+    try:
+        # Connect to PostgreSQL database
+        conn = psycopg2.connect(**DB_CONFIG)
+        cursor = conn.cursor()
+
+        # Fetch all table names in the public schema
+        cursor.execute("""
+            SELECT tablename 
+            FROM pg_tables 
+            WHERE schemaname = 'public';
+        """)
+        tables = cursor.fetchall()
+
+        # Generate and execute TRUNCATE command for all tables
+        if tables:
+            truncate_query = sql.SQL("TRUNCATE TABLE {} RESTART IDENTITY CASCADE").format(
+                sql.SQL(', ').join(sql.Identifier(table[0]) for table in tables)
+            )
+            cursor.execute(truncate_query)
+            conn.commit()
+            print("All tables truncated successfully.")
+        else:
+            print("No tables found in the public schema.")
+
+    except (Exception, psycopg2.DatabaseError) as error:
+        print(f"Error occurred: {error}")
+    finally:
+        # Close the cursor and connection
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
 def generate_random_code(length=10):
     """Generate a random alphanumeric code of specified length."""
@@ -45,6 +96,22 @@ def findGuid(ID_or_phone,cursor,connection):
     return guid
 
 
+def get_columns(table_name, cursor):
+    query_command = f"""SELECT column_name FROM information_schema.columns WHERE table_name = '{table_name}'"""
+    cursor.execute(query_command)
+    columns = [row[0] for row in cursor.fetchall()]
+    return columns
+
+def get_columns_ordinal_postion(table_name, cursor):
+    query_command = f"""
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_name = '{table_name}'
+        ORDER BY ordinal_position
+    """
+    cursor.execute(query_command)
+    columns = [row[0] for row in cursor.fetchall()]
+    return columns
 def reorder_rows_by_ID(Crf_Data):
     Crf_Data['ID'] = pd.to_numeric(Crf_Data['ID'], errors='coerce')
 
@@ -58,6 +125,37 @@ def reorder_rows_by_ID(Crf_Data):
     Crf_Data.reset_index(drop=True, inplace=True)
     return Crf_Data
 
+def build_query_with_values(tablename, colnames, row):
+    # Format column names and values for the insert query
+    colnames_str = ", ".join(colnames)
+    values_str = ", ".join([f"'{str(value)}'" for value in row])
+    query = f"INSERT INTO {tablename} ({colnames_str}) VALUES ({values_str})"
+    return query
+
+def process_data_table(tablename,excluded_columns):
+
+    try:
+        # Connect to the source database
+        source_conn = psycopg2.connect(**source_db_config)
+        source_cursor = source_conn.cursor()
+        dest_conn = psycopg2.connect(**destination_db_config)
+        dest_cursor = dest_conn.cursor()
+        # Get all column names
+        all_columns = get_columns_ordinal_postion(tablename, source_cursor)
+
+        # Exclude specified columns
+        colnames = [col for col in all_columns if col not in excluded_columns]
+
+
+        # Fetch data from source database
+        source_cursor.execute(sql.SQL("SELECT {} FROM {}").format(
+            sql.SQL(', ').join(map(sql.Identifier, [col for col in all_columns if col not in excluded_columns])),
+            sql.Identifier(tablename)
+        ))
+        data = source_cursor.fetchall()
+    except Exception as e:
+        print(f"Error processing CRF table: {e}")
+    insert_data_into_destination(tablename, data, colnames)
 
 
 # Function to process and insert data from CrfYaData DataFrame into the Patients table
@@ -98,6 +196,61 @@ def Crf_to_subjet_table(Crf_Data,cursor, connection):
         except psycopg2.Error as e:
             print(e)
             connection.rollback()
+
+def fetch_data_from_source(tablename, exclude_columns):
+    try:
+        # Connect to the source database
+        source_conn = psycopg2.connect(**source_db_config)
+        source_cursor = source_conn.cursor()
+
+        # Get all column names
+        all_columns = get_columns(tablename, source_cursor)
+
+        # Exclude specified columns
+        colnames = [col for col in all_columns if col not in exclude_columns]
+
+        # Fetch data from source database
+        source_cursor.execute(sql.SQL("SELECT {} FROM {}").format(
+            sql.SQL(', ').join(map(sql.Identifier, colnames)),
+            sql.Identifier(tablename)
+        ))
+        data = source_cursor.fetchall()
+
+        # Close connection
+        source_cursor.close()
+        source_conn.close()
+
+        return data, colnames
+    except Exception as e:
+        print(f"Error fetching data from source: {e}")
+        return None, None
+
+def insert_data_into_destination(tablename, data, colnames):
+    try:
+        # Connect to the destination database
+        dest_conn = psycopg2.connect(**destination_db_config)
+        dest_cursor = dest_conn.cursor()
+
+        # Iterate over each row in the data
+        for row in data:
+            # Build the insert query with actual values for each row
+            try:
+             insert_query = build_query_with_values(tablename, colnames, row)
+             # Print the query before execution
+             print(f"Executing query: {insert_query}")
+             dest_cursor.execute(insert_query)
+             dest_conn.commit()
+            except Exception as e:
+             print(f"Error inserting data into destination: {e}")
+             dest_conn.rollback()
+        # Commit changes
+        dest_conn.commit()
+
+        # Close connection
+        dest_cursor.close()
+        dest_conn.close()
+    except Exception as e:
+        print(f"Error inserting data into destination: {e}")
 
 
 # Function to transform and insert data from CrfYaData DataFrame into the CRF table
@@ -212,15 +365,91 @@ def open_and_read_google(sheet_id):
     data=pd.DataFrame(data[1:], columns=data[0])
     return data
 
+def INSERT_INTO_QUESTIONAIRE_TABLE(questionaireVersion):
+    connection = connect_to_db()
+    if connection is None:
+        return
+    cursor = connection.cursor()
+    for index, row in questionaireVersion.iterrows():
+        try:
+            insert_query = f"INSERT INTO questionaire (dateTime) VALUES ('{row['חותמת זמן']}');"
+            cursor.execute(insert_query)
+            connection.commit()
+        except Error as e:
+            print("Error inserting data:", e)
+
+
+# Function to insert data into the questiones table
+def INSERT_INTO_QUESTIONES_TABLE(Questions):
+    connection = connect_to_db()
+    if connection is None:
+        return
+    cursor = connection.cursor()
+    columns = get_columns('questiones', cursor)
+
+    # Retrieve existing questions from the questiones table
+    select_query = "SELECT DISTINCT question FROM questiones"
+    cursor.execute(select_query)
+    results = cursor.fetchall()
+    QuestionsfromTable = [row[0] for row in results]
+
+    for value in Questions:
+        if value not in QuestionsfromTable:
+            value = value.replace("'", "''")
+            try:
+                insert_query = f"INSERT INTO questiones (Question) VALUES ('{value}');"
+                cursor.execute(insert_query)
+                connection.commit()
+            except Error as e:
+                print("Error inserting data:", e)
+
+
+# Function to insert data into the answers table
+def INSERT_INTO_ANSWERS_TABLE(Answers):
+    connection = connect_to_db()
+    if connection is None:
+        return
+    cursor = connection.cursor()
+
+    for AnswerColumn in Answers.columns:
+        if AnswerColumn != 'קוד הנבדק' and AnswerColumn != 'חותמת זמן':
+            for index, row in Answers.iterrows():
+                try:
+                    # Sanitize the question column name
+                    sanitized_column = AnswerColumn.replace("'", "''")
+                    # Retrieve the QuestioneId from the questiones table
+                    select_query = f"SELECT QuestioneId FROM questiones WHERE question='{sanitized_column}'"
+                    cursor.execute(select_query)
+                    QuestioneId = cursor.fetchone()[0]
+                    # Prepare the answr and timestamp
+                    Answer = row[AnswerColumn]
+                    Answer = str(Answer).replace("'", "''")
+                    # Retrieve the QuestionaireID from the questionaire table
+                    select_query = f"SELECT QuestionaireID FROM questionaire WHERE dateTime='{row['חותמת זמן']}'"
+                    cursor.execute(select_query)
+                    QuestionaireID = cursor.fetchone()[0]
+                    select_query=F"SELECT GuId FROM SUBJECTS WHERE QuestionaireCode='{row['קוד הנבדק']}'"
+                    cursor.execute(select_query)
+                    GuId = cursor.fetchone()
+                    if GuId:
+                      insert_query = f"INSERT INTO answers (GuId,QuestionaireCode, QuestioneId, QuestionaireID, Answer) VALUES ('{GuId[0]}','{row['קוד הנבדק']}', {QuestioneId}, {QuestionaireID}, N'{Answer}');"
+                      cursor.execute(insert_query)
+                      connection.commit()
+                except Error as e:
+                    if "syntax error" in str(e).lower():
+                        print(f"Failed query: {insert_query}")
+                    else:
+                        continue
 
 
 
-def read_excel_and_insert_data(Crf_Path,Ya_Shared_Scans_path,SNBB_path):
+def read_excel_and_insert_data(Crf_Path,Qustionaire_path,Ya_Shared_Scans_path,SNBB_path):
     try:
         # Connect to the PostgreSQL database
         connection = connect_to_db()
         cursor = connection.cursor()
         Crf_Data = open_and_read_google(Crf_Path)
+        questionaire_data = open_and_read_google(Qustionaire_path)
         SnBB_Scans_Data=pd.read_excel(SNBB_path)
         YaShared_Scans_Data=pd.read_excel(Ya_Shared_Scans_path)
 
@@ -241,16 +470,40 @@ def read_excel_and_insert_data(Crf_Path,Ya_Shared_Scans_path,SNBB_path):
             SnBB_Scans_Data[column] = SnBB_Scans_Data[column].apply(lambda x: str(x).strip())
         for column in YaShared_Scans_Data.columns:
            YaShared_Scans_Data[column] = YaShared_Scans_Data[column].apply(lambda x: str(x).strip())
-
+        for column in questionaire_data.columns:
+            questionaire_data[column] = [str(item).strip() for item in questionaire_data[column]]
         # Process and insert data into the PostgreSQL database
         Crf_to_subjet_table(Crf_Data,cursor, connection)
         Crf_Data_crf_table(Crf_Data, cursor, connection)
         process_and_insert_SnBBData(SnBB_Scans_Data, cursor, connection)
         process_and_insert_YaSharedScansData(YaShared_Scans_Data, cursor, connection)
-
+        INSERT_INTO_QUESTIONAIRE_TABLE(questionaire_data)
+        INSERT_INTO_QUESTIONES_TABLE(questionaire_data.columns.tolist())
+        INSERT_INTO_ANSWERS_TABLE(questionaire_data)
         print("Data insertion complete!")
     except Error as e:
         print("Error while inserting data to PostgreSQL:", e)
+
+def Insert_data_to_destination_database():
+    tablenames = ['subjects', 'questionaire', 'questiones', 'crf', 'scans', 'answers']
+    exclude_columns = ['id', 'phonenumber', 'email', 'firstname', 'lastname']
+    for tablename in tablenames:
+        if tablename == 'subjects':
+            process_data_table(tablename, ['id', 'email'])
+        elif tablename == 'crf':
+            process_data_table('crf', ['dob', 'id', 'cellularno', 'email', 'firstname', 'lastname'])
+        else:
+            # Fetch data from source database
+           data, colnames = fetch_data_from_source(tablename, exclude_columns)
+           if data and colnames:
+                #Insert data into destination database
+                insert_data_into_destination(tablename, data, colnames)
+           else:
+                print(f"No data fetched from source for table {tablename}.")
+
+
+
+
 
 def check_for_subject_with_missing_details(Questionaire_path):
     connection = connect_to_db()
@@ -313,11 +566,15 @@ def check_for_subject_with_missing_details(Questionaire_path):
 # Paths to the files
 CrfPath='1ZawIJ14Qep7r2Cs6PKI9lUVl5B2P3OKwdeTUARFQkag'
 #Ya_Shared_Scans_path = '//132.66.46.62/Raw_Data'
+Questionaire_path='1wyOBqgKe6mrSBQV32OAICFJIuWPqER_49cGaTvw41QM'
 #Questionaire_path = '1wyOBqgKe6mrSBQV32OAICFJIuWPqER_49cGaTvw41QM'
 #SNBB_path = '//132.66.46.165/snbb'
 Ya_Shared_Scans_path ='YaSharedScansData.xlsx'
 SNBB_path = 'SnBBData.xlsx'
-
+truncate_all_tables(source_db_config)
+truncate_all_tables(destination_db_config)
 # Run the data pipeline
-read_excel_and_insert_data(CrfPath,Ya_Shared_Scans_path,SNBB_path)
+read_excel_and_insert_data(CrfPath,Questionaire_path,Ya_Shared_Scans_path,SNBB_path)
+Insert_data_to_destination_database()
+
 ###check_for_subject_with_missing_details(Questionaire_path)
